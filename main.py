@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,11 +9,14 @@ import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from jwt import PyJWKClient
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
 logger = logging.getLogger("app_check")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+if not logger.handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setLevel(logging.INFO)
+    _handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(_handler)
 
 APP_CHECK_JWKS_URL = "https://firebaseappcheck.googleapis.com/v1/jwks"
 JWKS_CACHE_SECONDS = 6 * 60 * 60  # Google recommends caching JWKS for up to 6 hours
