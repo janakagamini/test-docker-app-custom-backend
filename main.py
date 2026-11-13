@@ -1,9 +1,18 @@
+import json
+import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from jwt import PyJWKClient
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("app_check")
 
 APP_CHECK_JWKS_URL = "https://firebaseappcheck.googleapis.com/v1/jwks"
 JWKS_CACHE_SECONDS = 6 * 60 * 60  # Google recommends caching JWKS for up to 6 hours
@@ -27,11 +36,41 @@ jwks_client = PyJWKClient(
 app = FastAPI(title="Minimal Firebase App Check Backend (Manual JWKS)")
 
 
+def _format_epoch(epoch: Any) -> str:
+    """Format a Unix timestamp as ISO-8601 UTC."""
+    if not isinstance(epoch, (int, float)):
+        return "N/A"
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+
+def _log_decoded_token(header: dict[str, Any], claims: dict[str, Any]) -> None:
+    """Log the decoded App Check JWT header, claims, and human-readable timestamps."""
+    now = datetime.now(tz=timezone.utc).timestamp()
+    exp = claims.get("exp")
+    ttl_seconds = int(exp - now) if isinstance(exp, (int, float)) else None
+
+    logger.info(
+        "\n=== Verified Firebase App Check Token ===\n"
+        "Header:\n%s\n"
+        "Claims:\n%s\n"
+        "Timestamps (UTC):\n"
+        "  issued_at : %s\n"
+        "  expires_at: %s (TTL: %s)\n"
+        "=========================================",
+        json.dumps(header, indent=2),
+        json.dumps(claims, indent=2),
+        _format_epoch(claims.get("iat")),
+        _format_epoch(exp),
+        f"{ttl_seconds}s" if ttl_seconds is not None else "N/A",
+    )
+
+
 def verify_app_check_token(
     x_firebase_appcheck: str | None = Header(default=None, alias="X-Firebase-AppCheck"),
 ) -> dict[str, Any]:
     """Manually verify a Firebase App Check JWT against the public JWKS endpoint."""
     if not x_firebase_appcheck:
+        logger.warning("Rejected request: missing X-Firebase-AppCheck header")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing X-Firebase-AppCheck header",
@@ -40,6 +79,7 @@ def verify_app_check_token(
     try:
         header = jwt.get_unverified_header(x_firebase_appcheck)
         if header.get("alg") != "RS256" or header.get("typ") != "JWT":
+            logger.warning("Rejected token: invalid header %s", header)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid App Check token header",
@@ -57,22 +97,26 @@ def verify_app_check_token(
     except HTTPException:
         raise
     except jwt.PyJWTError as exc:
+        logger.warning("Rejected token: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid App Check token: {exc}",
         ) from exc
     except Exception as exc:
+        logger.warning("App Check verification failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"App Check verification failed: {exc}",
         ) from exc
 
     if not claims.get("sub"):
+        logger.warning("Rejected token: missing subject (app ID)")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="App Check token missing subject (app ID)",
         )
 
+    _log_decoded_token(header, claims)
     return claims
 
 
